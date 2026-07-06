@@ -1,0 +1,8 @@
+# Allow access to service worker and manifest
+<Files "service-worker.js">
+    Header set Service-Worker-Allowed "/"
+</Files>
+
+RewriteEngine on
+RewriteRule ^$ /public/ [L]
+RewriteRule (.*) /public/$1 [L]
