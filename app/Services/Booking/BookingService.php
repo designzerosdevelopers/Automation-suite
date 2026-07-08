@@ -72,11 +72,12 @@ class BookingService
 
     public function checkSlotAvailability(string $datetime): bool
     {
-        $existingBooking = Booking::where('appointment_time', $datetime)
-            ->where('status', '!=', Booking::STATUS_CANCELLED)
-            ->exists();
+        return $this->bookingRepository->isSlotAvailable($datetime);
+    }
 
-        return !$existingBooking;
+    public function isSlotAvailableForBooking(string $datetime, int $bookingId): bool
+    {
+        return $this->bookingRepository->isSlotAvailableForBooking($datetime, $bookingId);
     }
 
     public function getAlternativeSlots(string $date): array
@@ -137,32 +138,6 @@ class BookingService
         $appointmentDateTime = $data['appointment_date'] . ' ' . $data['appointment_time'];
         $duration = (int) config('ai-receptionist.booking.default_duration_minutes', 60);
 
-        // Check for existing active bookings
-        $existingBookings = $this->bookingRepository->getActiveBookingsByPhone($data['phone']);
-        
-        if ($existingBookings->isNotEmpty()) {
-            return [
-                'success' => false,
-                'message' => 'You already have an active booking. Would you like to update or cancel it instead?',
-                'action' => 'existing_booking_found',
-                'existing_bookings' => $this->formatBookingsForResponse($existingBookings),
-                'can_book_another' => config('ai-receptionist.booking.allow_multiple_bookings', false),
-            ];
-        }
-
-        // Check daily booking limit
-        $bookingCountToday = $this->bookingRepository->countBookingsToday($data['phone']);
-        $maxBookingsPerDay = Booking::MAX_BOOKINGS_PER_DAY;
-        
-        if ($bookingCountToday >= $maxBookingsPerDay) {
-            return [
-                'success' => false,
-                'message' => "You have reached the maximum of {$maxBookingsPerDay} bookings per day. Please try again tomorrow.",
-                'action' => 'limit_reached',
-            ];
-        }
-
-        // Create booking in database
         $bookingData = $this->bookingRepository->create([
             'name' => $data['name'],
             'phone' => $data['phone'],
@@ -174,7 +149,6 @@ class BookingService
             'notes' => $data['notes'] ?? 'Booked via Vapi AI',
             'google_sync_status' => 'pending',
             'last_booking_at' => now(),
-            'booking_count_today' => $bookingCountToday + 1,
         ]);
 
         Log::info('Booking created in database', [
@@ -183,7 +157,6 @@ class BookingService
             'duration_minutes' => $duration
         ]);
 
-        // Create in Google Calendar
         $googleResult = $this->syncWithGoogleCalendar($bookingData, $data);
 
         Log::info('Appointment booked', [
@@ -194,12 +167,26 @@ class BookingService
         ]);
 
         return [
-            'success' => true,
             'booking' => $bookingData,
             'google_synced' => $googleResult['synced'],
             'google_event_id' => $bookingData->google_event_id,
             'google_event_link' => $bookingData->google_event_link,
         ];
+    }
+
+    public function updateBooking(Booking $booking, array $data): Booking
+    {
+        return $this->bookingRepository->update($booking, $data);
+    }
+
+    public function updateGoogleCalendarEvent(Booking $booking, array $data): void
+    {
+        if ($booking->google_event_id) {
+            $this->googleCalendarService->updateBooking(
+                $booking->google_event_id,
+                $data
+            );
+        }
     }
 
     public function syncWithGoogleCalendar(Booking $booking, array $data): array
@@ -258,7 +245,6 @@ class BookingService
         $maxCancellationsPerDay = Booking::MAX_CANCELLATIONS_PER_DAY;
 
         if ($cancellationsToday >= $maxCancellationsPerDay) {
-            // Flag the phone number
             $this->bookingRepository->flagPhone($booking->phone);
             
             return [
@@ -285,7 +271,6 @@ class BookingService
             }
         }
 
-        // Cancel the booking in database
         try {
             $this->bookingRepository->cancel($booking, $reason);
             $this->bookingRepository->incrementCancellationCountToday($booking);
@@ -298,7 +283,6 @@ class BookingService
             throw $e;
         }
 
-        // Cancel Google Calendar event
         if (!empty($googleEventId)) {
             try {
                 $this->googleCalendarService->cancelBooking($googleEventId);
@@ -323,7 +307,6 @@ class BookingService
             }
         }
 
-        // Check if phone should be flagged for frequent cancellations
         $cancellationsToday = $this->bookingRepository->countCancellationsToday($booking->phone);
         if ($cancellationsToday >= $maxCancellationsPerDay) {
             $this->bookingRepository->flagPhone($booking->phone);
@@ -345,6 +328,44 @@ class BookingService
     public function getUpcomingBookings(string $phone): array
     {
         return $this->bookingRepository->getUpcomingByPhone($phone)->toArray();
+    }
+
+    public function checkExistingBooking(string $phone): array
+    {
+        $bookings = $this->bookingRepository->getActiveBookingsByPhone($phone);
+        
+        if ($bookings->isEmpty()) {
+            return [
+                'has_existing' => false,
+                'message' => 'No existing active bookings found.',
+            ];
+        }
+
+        return [
+            'has_existing' => true,
+            'count' => $bookings->count(),
+            'bookings' => $this->formatBookingsForResponse($bookings),
+            'message' => "You have {$bookings->count()} active booking(s).",
+            'can_cancel' => true,
+            'can_update' => true,
+        ];
+    }
+
+    public function getBookingLimits(string $phone): array
+    {
+        $bookingsToday = $this->bookingRepository->countBookingsToday($phone);
+        $cancellationsToday = $this->bookingRepository->countCancellationsToday($phone);
+        $isFlagged = $this->bookingRepository->isPhoneFlagged($phone);
+        
+        return [
+            'bookings_today' => $bookingsToday,
+            'max_bookings_per_day' => Booking::MAX_BOOKINGS_PER_DAY,
+            'cancellations_today' => $cancellationsToday,
+            'max_cancellations_per_day' => Booking::MAX_CANCELLATIONS_PER_DAY,
+            'bookings_remaining' => max(0, Booking::MAX_BOOKINGS_PER_DAY - $bookingsToday),
+            'cancellations_remaining' => max(0, Booking::MAX_CANCELLATIONS_PER_DAY - $cancellationsToday),
+            'is_flagged' => $isFlagged,
+        ];
     }
 
     public function resyncGoogleBookings(?int $bookingId = null, ?int $days = null): array
@@ -407,33 +428,14 @@ class BookingService
         ];
     }
 
-    protected function sendBookingNotification(Booking $booking): void
-    {
-        try {
-            $this->notificationService->sendAppointmentConfirmation($booking);
-        } catch (\Exception $e) {
-            Log::error('Booking notification failed', [
-                'booking_id' => $booking->id,
-                'error' => $e->getMessage()
-            ]);
-        }
-    }
-
-    protected function sendCancellationNotification(Booking $booking): void
-    {
-        try {
-            $this->notificationService->sendAppointmentCancellation($booking);
-        } catch (\Exception $e) {
-            Log::error('Cancellation notification failed', [
-                'booking_id' => $booking->id,
-                'error' => $e->getMessage()
-            ]);
-        }
-    }
-
     public function getBookingById(int $id): ?Booking
     {
         return $this->bookingRepository->findById($id);
+    }
+
+    public function getStats(): array
+    {
+        return $this->bookingRepository->getStats();
     }
 
     public function formatBookingForResponse(Booking $booking): array
@@ -473,42 +475,5 @@ class BookingService
         }
 
         return [];
-    }
-
-    public function checkExistingBooking(string $phone): array
-    {
-        $bookings = $this->bookingRepository->getActiveBookingsByPhone($phone);
-        
-        if ($bookings->isEmpty()) {
-            return [
-                'has_existing' => false,
-                'message' => 'No existing active bookings found.',
-            ];
-        }
-
-        return [
-            'has_existing' => true,
-            'count' => $bookings->count(),
-            'bookings' => $this->formatBookingsForResponse($bookings),
-            'message' => "You have {$bookings->count()} active booking(s).",
-            'can_cancel' => true,
-            'can_update' => true,
-        ];
-    }
-
-    public function getBookingLimits(string $phone): array
-    {
-        $bookingsToday = $this->bookingRepository->countBookingsToday($phone);
-        $cancellationsToday = $this->bookingRepository->countCancellationsToday($phone);
-        
-        return [
-            'bookings_today' => $bookingsToday,
-            'max_bookings_per_day' => Booking::MAX_BOOKINGS_PER_DAY,
-            'cancellations_today' => $cancellationsToday,
-            'max_cancellations_per_day' => Booking::MAX_CANCELLATIONS_PER_DAY,
-            'bookings_remaining' => max(0, Booking::MAX_BOOKINGS_PER_DAY - $bookingsToday),
-            'cancellations_remaining' => max(0, Booking::MAX_CANCELLATIONS_PER_DAY - $cancellationsToday),
-            'is_flagged' => $this->bookingRepository->findByPhone($phone)?->is_flagged ?? false,
-        ];
     }
 }

@@ -98,6 +98,25 @@ class BookingRepository
             ->first();
     }
 
+    public function isSlotAvailable(string $datetime): bool
+    {
+        $existingBooking = Booking::where('appointment_time', $datetime)
+            ->where('status', '!=', Booking::STATUS_CANCELLED)
+            ->exists();
+
+        return !$existingBooking;
+    }
+
+    public function isSlotAvailableForBooking(string $datetime, int $bookingId): bool
+    {
+        $existingBooking = Booking::where('appointment_time', $datetime)
+            ->where('id', '!=', $bookingId)
+            ->where('status', '!=', Booking::STATUS_CANCELLED)
+            ->exists();
+
+        return !$existingBooking;
+    }
+
     public function countBookingsToday(string $phone): int
     {
         $phoneFormats = $this->getPhoneFormats($phone);
@@ -143,6 +162,75 @@ class BookingRepository
             ->first();
     }
 
+    public function isPhoneFlagged(string $phone): bool
+    {
+        $phoneFormats = $this->getPhoneFormats($phone);
+        
+        $booking = Booking::where(function($query) use ($phoneFormats) {
+            foreach ($phoneFormats as $format) {
+                $query->orWhere('phone', $format);
+            }
+        })->first();
+        
+        return $booking ? $booking->is_flagged : false;
+    }
+
+    public function flagPhone(string $phone): void
+    {
+        $phoneFormats = $this->getPhoneFormats($phone);
+        
+        Booking::where(function($query) use ($phoneFormats) {
+                foreach ($phoneFormats as $format) {
+                    $query->orWhere('phone', $format);
+                }
+            })
+            ->update(['is_flagged' => true]);
+    }
+
+    public function unflagPhone(string $phone): void
+    {
+        $phoneFormats = $this->getPhoneFormats($phone);
+        
+        Booking::where(function($query) use ($phoneFormats) {
+                foreach ($phoneFormats as $format) {
+                    $query->orWhere('phone', $format);
+                }
+            })
+            ->update(['is_flagged' => false]);
+    }
+
+    public function incrementCancellationCountToday(Booking $booking): void
+    {
+        $booking->increment('cancellation_count_today');
+        $booking->update(['last_cancellation_at' => now()]);
+    }
+
+    public function cancel(Booking $booking, ?string $reason = null): Booking
+    {
+        $booking->cancel($reason);
+        return $booking;
+    }
+
+    public function delete(Booking $booking): bool
+    {
+        return $booking->delete();
+    }
+
+    public function getStats(): array
+    {
+        $total = Booking::count();
+        $confirmed = Booking::confirmed()->count();
+        $pending = Booking::pending()->count();
+        $cancelled = Booking::cancelled()->count();
+        $upcoming = Booking::upcoming()->count();
+        $today = Booking::today()->count();
+        $googleSynced = Booking::googleSynced()->count();
+        $googleFailed = Booking::googleFailed()->count();
+        $active = Booking::active()->count();
+        
+        return compact('total', 'confirmed', 'pending', 'cancelled', 'upcoming', 'today', 'googleSynced', 'googleFailed', 'active');
+    }
+
     public function findByGoogleEventId(string $googleEventId): ?Booking
     {
         return Booking::where('google_event_id', $googleEventId)->first();
@@ -161,19 +249,6 @@ class BookingRepository
     public function getToday(): Collection
     {
         return Booking::with(['callLog'])->today()->get();
-    }
-
-    public function getForPhone(string $phone): Collection
-    {
-        $phoneFormats = $this->getPhoneFormats($phone);
-        
-        return Booking::where(function($query) use ($phoneFormats) {
-                foreach ($phoneFormats as $format) {
-                    $query->orWhere('phone', $format);
-                }
-            })
-            ->orderBy('appointment_time', 'desc')
-            ->get();
     }
 
     public function getPendingReminders(): Collection
@@ -203,15 +278,17 @@ class BookingRepository
             ->get();
     }
 
-    public function delete(Booking $booking): bool
+    public function getByPhone(string $phone): Collection
     {
-        return $booking->delete();
-    }
-
-    public function cancel(Booking $booking, ?string $reason = null): Booking
-    {
-        $booking->cancel($reason);
-        return $booking;
+        $phoneFormats = $this->getPhoneFormats($phone);
+        
+        return Booking::where(function($query) use ($phoneFormats) {
+                foreach ($phoneFormats as $format) {
+                    $query->orWhere('phone', $format);
+                }
+            })
+            ->orderBy('appointment_time', 'desc')
+            ->get();
     }
 
     public function getCountByStatus(): array
@@ -220,21 +297,6 @@ class BookingRepository
             ->groupBy('status')
             ->pluck('total', 'status')
             ->toArray();
-    }
-
-    public function getStats(): array
-    {
-        $total = Booking::count();
-        $confirmed = Booking::confirmed()->count();
-        $pending = Booking::pending()->count();
-        $cancelled = Booking::cancelled()->count();
-        $upcoming = Booking::upcoming()->count();
-        $today = Booking::today()->count();
-        $googleSynced = Booking::googleSynced()->count();
-        $googleFailed = Booking::googleFailed()->count();
-        $active = Booking::active()->count();
-        
-        return compact('total', 'confirmed', 'pending', 'cancelled', 'upcoming', 'today', 'googleSynced', 'googleFailed', 'active');
     }
 
     public function getByDateRange(string $startDate, string $endDate): Collection
@@ -280,12 +342,6 @@ class BookingRepository
         $booking->update(['last_booking_at' => now()]);
     }
 
-    public function incrementCancellationCountToday(Booking $booking): void
-    {
-        $booking->increment('cancellation_count_today');
-        $booking->update(['last_cancellation_at' => now()]);
-    }
-
     public function resetDailyCounts(): void
     {
         Booking::whereDate('created_at', '<', today())
@@ -293,45 +349,6 @@ class BookingRepository
                 'booking_count_today' => 0,
                 'cancellation_count_today' => 0,
             ]);
-    }
-
-    public function resetDailyCountsForPhone(string $phone): void
-    {
-        $phoneFormats = $this->getPhoneFormats($phone);
-        
-        Booking::where(function($query) use ($phoneFormats) {
-                foreach ($phoneFormats as $format) {
-                    $query->orWhere('phone', $format);
-                }
-            })
-            ->update([
-                'booking_count_today' => 0,
-                'cancellation_count_today' => 0,
-            ]);
-    }
-
-    public function flagPhone(string $phone): void
-    {
-        $phoneFormats = $this->getPhoneFormats($phone);
-        
-        Booking::where(function($query) use ($phoneFormats) {
-                foreach ($phoneFormats as $format) {
-                    $query->orWhere('phone', $format);
-                }
-            })
-            ->update(['is_flagged' => true]);
-    }
-
-    public function unflagPhone(string $phone): void
-    {
-        $phoneFormats = $this->getPhoneFormats($phone);
-        
-        Booking::where(function($query) use ($phoneFormats) {
-                foreach ($phoneFormats as $format) {
-                    $query->orWhere('phone', $format);
-                }
-            })
-            ->update(['is_flagged' => false]);
     }
 
     private function getPhoneFormats(string $phone): array
