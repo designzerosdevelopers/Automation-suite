@@ -11,6 +11,16 @@ class Booking extends Model
 {
     use HasFactory, SoftDeletes;
 
+    const STATUS_PENDING = 'pending';
+    const STATUS_CONFIRMED = 'confirmed';
+    const STATUS_SCHEDULED = 'scheduled';
+    const STATUS_COMPLETED = 'completed';
+    const STATUS_CANCELLED = 'cancelled';
+
+    const MAX_CANCELLATIONS_PER_DAY = 3;
+    const MAX_BOOKINGS_PER_DAY = 5;
+    const CANCELLATION_COOLDOWN_MINUTES = 5;
+
     protected $fillable = [
         'name',
         'phone',
@@ -31,6 +41,11 @@ class Booking extends Model
         'cancellation_reason',
         'notes',
         'metadata',
+        'last_booking_at',
+        'booking_count_today',
+        'last_cancellation_at',
+        'cancellation_count_today',
+        'is_flagged',
     ];
 
     protected $casts = [
@@ -41,47 +56,55 @@ class Booking extends Model
         'cancelled_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
+        'last_booking_at' => 'datetime',
+        'booking_count_today' => 'integer',
+        'last_cancellation_at' => 'datetime',
+        'cancellation_count_today' => 'integer',
+        'is_flagged' => 'boolean',
     ];
 
-    // Relationship with Call Log
     public function callLog()
     {
         return $this->belongsTo(CallLog::class, 'call_id', 'call_id');
     }
 
-    // Scopes
     public function scopeUpcoming($query)
     {
         return $query->where('appointment_time', '>=', now())
-            ->where('status', '!=', 'cancelled')
+            ->where('status', '!=', self::STATUS_CANCELLED)
             ->orderBy('appointment_time', 'asc');
     }
 
     public function scopeToday($query)
     {
         return $query->whereDate('appointment_time', today())
-            ->where('status', '!=', 'cancelled')
+            ->where('status', '!=', self::STATUS_CANCELLED)
             ->orderBy('appointment_time', 'asc');
+    }
+
+    public function scopeActive($query)
+    {
+        return $query->whereIn('status', [self::STATUS_PENDING, self::STATUS_CONFIRMED, self::STATUS_SCHEDULED]);
     }
 
     public function scopeConfirmed($query)
     {
-        return $query->where('status', 'confirmed');
+        return $query->where('status', self::STATUS_CONFIRMED);
     }
 
     public function scopePending($query)
     {
-        return $query->where('status', 'pending');
+        return $query->where('status', self::STATUS_PENDING);
     }
 
     public function scopeCancelled($query)
     {
-        return $query->where('status', 'cancelled');
+        return $query->where('status', self::STATUS_CANCELLED);
     }
 
     public function scopeScheduled($query)
     {
-        return $query->where('status', 'scheduled');
+        return $query->where('status', self::STATUS_SCHEDULED);
     }
 
     public function scopeGoogleSynced($query)
@@ -94,7 +117,6 @@ class Booking extends Model
         return $query->where('google_sync_status', 'failed');
     }
 
-    // Accessors
     public function getFormattedAppointmentAttribute(): ?string
     {
         return $this->appointment_time ? $this->appointment_time->format('l, F j, Y \a\t g:i A') : null;
@@ -115,61 +137,69 @@ class Booking extends Model
         return $this->google_sync_status === 'synced' && !empty($this->google_event_id);
     }
 
-    // Status checks
+    public function getIsActiveAttribute(): bool
+    {
+        return in_array($this->status, [self::STATUS_PENDING, self::STATUS_CONFIRMED, self::STATUS_SCHEDULED]);
+    }
+
     public function isConfirmed(): bool
     {
-        return $this->status === 'confirmed';
+        return $this->status === self::STATUS_CONFIRMED;
     }
 
     public function isPending(): bool
     {
-        return $this->status === 'pending';
+        return $this->status === self::STATUS_PENDING;
     }
 
     public function isCancelled(): bool
     {
-        return $this->status === 'cancelled';
+        return $this->status === self::STATUS_CANCELLED;
     }
 
     public function isCompleted(): bool
     {
-        return $this->status === 'completed';
+        return $this->status === self::STATUS_COMPLETED;
     }
 
     public function isScheduled(): bool
     {
-        return $this->status === 'scheduled';
+        return $this->status === self::STATUS_SCHEDULED;
+    }
+
+    public function isActive(): bool
+    {
+        return in_array($this->status, [self::STATUS_PENDING, self::STATUS_CONFIRMED, self::STATUS_SCHEDULED]);
     }
 
     public function canBeCancelled(): bool
     {
-        return in_array($this->status, ['pending', 'confirmed', 'scheduled']);
+        return $this->isActive() && $this->appointment_time->gt(now());
     }
 
     public function canBeRescheduled(): bool
     {
-        return in_array($this->status, ['pending', 'confirmed', 'scheduled']) 
-            && $this->appointment_time->gt(now());
+        return $this->isActive() && $this->appointment_time->gt(now());
     }
 
-    // Actions
     public function cancel(?string $reason = null): void
     {
         $this->update([
-            'status' => 'cancelled',
+            'status' => self::STATUS_CANCELLED,
             'cancelled_at' => now(),
             'cancellation_reason' => $reason,
+            'last_cancellation_at' => now(),
         ]);
     }
 
     public function confirm(): void
     {
-        $this->update(['status' => 'confirmed']);
+        $this->update(['status' => self::STATUS_CONFIRMED]);
     }
 
     public function complete(): void
     {
-        $this->update(['status' => 'completed']);
+        $this->update(['status' => self::STATUS_COMPLETED]);
     }
 
     public function markGoogleSynced(string $eventId, string $eventLink, ?string $meetLink = null): void
@@ -208,6 +238,7 @@ class Booking extends Model
         $data['formatted_date'] = $this->formatted_date;
         $data['formatted_time'] = $this->formatted_time;
         $data['is_google_synced'] = $this->is_google_synced;
+        $data['is_active'] = $this->is_active;
         return $data;
     }
 }

@@ -15,10 +15,8 @@ return new class extends Migration
             $table->string('phone');
             $table->string('email')->nullable();
             
-            // Call relationship
-            $table->string('call_id')->nullable()->index();  // ← ADD THIS
+            $table->string('call_id')->nullable()->index();
             
-            // Google Calendar integration fields
             $table->string('google_event_id')->nullable()->index();
             $table->string('google_event_link')->nullable();
             $table->string('google_meet_link')->nullable();
@@ -35,12 +33,21 @@ return new class extends Migration
             $table->string('cancellation_reason')->nullable();
             $table->text('notes')->nullable();
             $table->json('metadata')->nullable();
+            
+            // New fields for multiple booking handling
+            $table->timestamp('last_booking_at')->nullable();
+            $table->integer('booking_count_today')->default(0);
+            $table->timestamp('last_cancellation_at')->nullable();
+            $table->integer('cancellation_count_today')->default(0);
+            $table->boolean('is_flagged')->default(false);
+            
             $table->timestamps();
             $table->softDeletes();
 
             $table->index(['appointment_time', 'status']);
             $table->index('phone');
             $table->index('google_sync_status');
+            $table->index(['phone', 'status', 'appointment_time']);
         });
     }
 

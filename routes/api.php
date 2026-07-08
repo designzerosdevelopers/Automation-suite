@@ -9,12 +9,15 @@ Route::post('/vapi/webhook', [VapiWebhookController::class, 'handle'])
 
 // Route::middleware('verify.vapi')->group(function () {
 
-    Route::post('/check-availability', [BookingApiController::class, 'checkAvailability']);
-    Route::post('/book-appointment', [BookingApiController::class, 'bookAppointment']);
-    Route::post('/cancel-appointment', [BookingApiController::class, 'cancelAppointment']);
-    Route::post('/resync-calendly', [BookingApiController::class, 'resyncCalendly']);
-    Route::get('/booking/{id}', [BookingApiController::class, 'getBooking']);
-    Route::get('/upcoming-bookings', [BookingApiController::class, 'getUpcomingBookings']);
-    Route::get('/booking-stats', [BookingApiController::class, 'getStats']);
+Route::post('/check-availability', [BookingApiController::class, 'checkAvailability']);
+Route::post('/book-appointment', [BookingApiController::class, 'bookAppointment']);
+Route::post('/cancel-appointment', [BookingApiController::class, 'cancelAppointment']);
+Route::post('/update-appointment', [BookingApiController::class, 'updateAppointment']);
+Route::post('/booking-limits', [BookingApiController::class, 'getBookingLimits']);
+Route::post('/upcoming-bookings', [BookingApiController::class, 'getUpcomingBookings']);
+Route::get('/booking/{id}', [BookingApiController::class, 'getBooking']);
+Route::get('/booking-stats', [BookingApiController::class, 'getStats']);
+Route::post('/resync-google', [BookingApiController::class, 'resyncGoogle']);
+
     
 // });
