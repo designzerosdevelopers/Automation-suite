@@ -27,7 +27,6 @@ class GoogleCalendarService
         try {
             $this->client = new Client();
             
-            // 🔥 HARDCODE THE OAUTH CREDENTIALS DIRECTLY 🔥
             $this->client->setAuthConfig([
                 'installed' => [
                     'client_id' => '646210139527-r84lr23j9i6nn7qc4e4f45gutnmpoggl.apps.googleusercontent.com',
@@ -38,7 +37,7 @@ class GoogleCalendarService
                     'client_secret' => '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',
                     'redirect_uris' => [
                         'http://127.0.0.1:8000',
-                        'http://127.0.0.1:8000/google-auth-callback'  // ← ADDED
+                        'http://127.0.0.1:8000/google-auth-callback'
                     ]
                 ]
             ]);
@@ -48,13 +47,11 @@ class GoogleCalendarService
             $this->client->setAccessType('offline');
             $this->client->setPrompt('select_account consent');
 
-            // Load existing token
             $token = $this->getToken();
             if ($token) {
                 $this->client->setAccessToken($token);
             }
 
-            // Refresh token if expired
             if ($this->client->isAccessTokenExpired()) {
                 $refreshToken = $this->client->getRefreshToken();
                 if ($refreshToken) {
@@ -78,26 +75,17 @@ class GoogleCalendarService
         }
     }
 
-    /**
-     * Get authorization URL (run once to get token)
-     */
     public function getAuthUrl(): string
     {
         return $this->client->createAuthUrl();
     }
 
-    /**
-     * Exchange authorization code for token
-     */
     public function authenticateWithCode(string $code): void
     {
         $token = $this->client->fetchAccessTokenWithAuthCode($code);
         $this->saveToken($token);
     }
 
-    /**
-     * Create a booking in Google Calendar
-     */
     public function createBooking(array $bookingData): array
     {
         try {
@@ -133,7 +121,6 @@ class GoogleCalendarService
                 'start_time' => $startTime->toIso8601String()
             ]);
 
-            // Refresh token if expired
             if ($this->client->isAccessTokenExpired()) {
                 $refreshToken = $this->client->getRefreshToken();
                 if ($refreshToken) {
@@ -169,8 +156,141 @@ class GoogleCalendarService
     }
 
     /**
-     * Cancel a booking from Google Calendar
+     * Update an existing booking in Google Calendar
      */
+    public function updateBooking(string $eventId, array $updateData): array
+    {
+        try {
+            // Get the existing event
+            $event = $this->service->events->get($this->calendarId, $eventId);
+
+            // Update summary/title
+            if (isset($updateData['name']) || isset($updateData['service'])) {
+                $currentSummary = $event->getSummary();
+                $summary = $event->getSummary();
+                
+                if (isset($updateData['service']) && isset($updateData['name'])) {
+                    $summary = $updateData['service'] . ' - ' . $updateData['name'];
+                } elseif (isset($updateData['service'])) {
+                    // Extract name from current summary or use default
+                    $name = $this->extractNameFromSummary($currentSummary) ?? 'Patient';
+                    $summary = $updateData['service'] . ' - ' . $name;
+                } elseif (isset($updateData['name'])) {
+                    // Extract service from current summary or use default
+                    $service = $this->extractServiceFromSummary($currentSummary) ?? 'Appointment';
+                    $summary = $service . ' - ' . $updateData['name'];
+                }
+                
+                $event->setSummary($summary);
+            }
+
+            // Update date/time
+            if (isset($updateData['appointment_time'])) {
+                $startTime = Carbon::parse($updateData['appointment_time']);
+                $duration = $updateData['duration_minutes'] ?? 60;
+                $endTime = $startTime->copy()->addMinutes($duration);
+
+                $event->setStart([
+                    'dateTime' => $startTime->format('Y-m-d\TH:i:s'),
+                    'timeZone' => config('app.timezone', 'UTC'),
+                ]);
+                $event->setEnd([
+                    'dateTime' => $endTime->format('Y-m-d\TH:i:s'),
+                    'timeZone' => config('app.timezone', 'UTC'),
+                ]);
+            }
+
+            // Update description/notes
+            if (isset($updateData['notes'])) {
+                $currentDescription = $event->getDescription() ?? '';
+                $updatedDescription = $this->updateDescription($currentDescription, $updateData);
+                $event->setDescription($updatedDescription);
+            }
+
+            // Update phone in description
+            if (isset($updateData['phone'])) {
+                $currentDescription = $event->getDescription() ?? '';
+                $updatedDescription = $this->updatePhoneInDescription($currentDescription, $updateData['phone']);
+                $event->setDescription($updatedDescription);
+            }
+
+            // Update name in description
+            if (isset($updateData['name'])) {
+                $currentDescription = $event->getDescription() ?? '';
+                $updatedDescription = $this->updateNameInDescription($currentDescription, $updateData['name']);
+                $event->setDescription($updatedDescription);
+            }
+
+            // Update service in description
+            if (isset($updateData['service'])) {
+                $currentDescription = $event->getDescription() ?? '';
+                $updatedDescription = $this->updateServiceInDescription($currentDescription, $updateData['service']);
+                $event->setDescription($updatedDescription);
+            }
+
+            // Update attendees (email)
+            if (isset($updateData['email'])) {
+                $attendees = $event->getAttendees() ?? [];
+                $found = false;
+                
+                foreach ($attendees as $attendee) {
+                    $email = $attendee->getEmail();
+                    // Check if this is the patient's email (not the owner's email)
+                    if ($email !== $this->ownerEmail && !str_contains($email, '@example.com')) {
+                        $attendee->setEmail($updateData['email']);
+                        $found = true;
+                        break;
+                    }
+                }
+                
+                if (!$found) {
+                    $newAttendee = new \Google\Service\Calendar\EventAttendee();
+                    $newAttendee->setEmail($updateData['email']);
+                    $attendees[] = $newAttendee;
+                }
+                
+                $event->setAttendees($attendees);
+            }
+
+            // Refresh token if expired
+            if ($this->client->isAccessTokenExpired()) {
+                $refreshToken = $this->client->getRefreshToken();
+                if ($refreshToken) {
+                    $this->client->fetchAccessTokenWithRefreshToken($refreshToken);
+                    $this->saveToken($this->client->getAccessToken());
+                }
+            }
+
+            // Update the event
+            $updatedEvent = $this->service->events->update(
+                $this->calendarId,
+                $eventId,
+                $event,
+                ['sendUpdates' => 'all']
+            );
+
+            Log::info('Google Calendar event updated', [
+                'event_id' => $eventId,
+                'event_link' => $updatedEvent->getHtmlLink(),
+                'updates' => array_keys($updateData)
+            ]);
+
+            return [
+                'success' => true,
+                'event_id' => $updatedEvent->getId(),
+                'event_link' => $updatedEvent->getHtmlLink(),
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Google Calendar update failed', [
+                'event_id' => $eventId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            throw $e;
+        }
+    }
+
     public function cancelBooking(string $eventId): bool
     {
         try {
@@ -191,9 +311,6 @@ class GoogleCalendarService
         }
     }
 
-    /**
-     * Get stored token
-     */
     protected function getToken()
     {
         $tokenPath = storage_path('google/token.json');
@@ -203,18 +320,12 @@ class GoogleCalendarService
         return null;
     }
 
-    /**
-     * Save token to file
-     */
     protected function saveToken(array $token)
     {
         $tokenPath = storage_path('google/token.json');
         file_put_contents($tokenPath, json_encode($token));
     }
 
-    /**
-     * Format description for Google Calendar
-     */
     protected function formatDescription(array $data): string
     {
         $description = "📋 APPOINTMENT DETAILS\n";
@@ -237,9 +348,6 @@ class GoogleCalendarService
         return $description;
     }
 
-    /**
-     * Format attendees for Google Calendar
-     */
     protected function formatAttendees(array $data): array
     {
         $attendees = [];
@@ -255,5 +363,124 @@ class GoogleCalendarService
         $attendees[] = ['email' => $this->ownerEmail];
 
         return $attendees;
+    }
+
+    /**
+     * Extract name from event summary
+     */
+    protected function extractNameFromSummary(?string $summary): ?string
+    {
+        if (empty($summary)) return null;
+        
+        $parts = explode(' - ', $summary);
+        return count($parts) > 1 ? $parts[1] : $parts[0];
+    }
+
+    /**
+     * Extract service from event summary
+     */
+    protected function extractServiceFromSummary(?string $summary): ?string
+    {
+        if (empty($summary)) return null;
+        
+        $parts = explode(' - ', $summary);
+        return count($parts) > 1 ? $parts[0] : null;
+    }
+
+    /**
+     * Update description with new data
+     */
+    protected function updateDescription(string $description, array $data): string
+    {
+        $lines = explode("\n", $description);
+        $updatedLines = [];
+
+        foreach ($lines as $line) {
+            if (str_starts_with($line, '📝 Notes:')) {
+                if (isset($data['notes'])) {
+                    $updatedLines[] = '📝 Notes:';
+                    $updatedLines[] = $data['notes'];
+                }
+            } elseif (str_starts_with($line, '👤 Patient:')) {
+                if (isset($data['name'])) {
+                    $updatedLines[] = '👤 Patient: ' . $data['name'];
+                } else {
+                    $updatedLines[] = $line;
+                }
+            } elseif (str_starts_with($line, '📱 Phone:')) {
+                if (isset($data['phone'])) {
+                    $updatedLines[] = '📱 Phone: ' . $data['phone'];
+                } else {
+                    $updatedLines[] = $line;
+                }
+            } elseif (str_starts_with($line, '🏥 Service:')) {
+                if (isset($data['service'])) {
+                    $updatedLines[] = '🏥 Service: ' . $data['service'];
+                } else {
+                    $updatedLines[] = $line;
+                }
+            } elseif (str_starts_with($line, '✉️ Email:')) {
+                if (isset($data['email'])) {
+                    $updatedLines[] = '✉️ Email: ' . $data['email'];
+                } else {
+                    $updatedLines[] = $line;
+                }
+            } else {
+                $updatedLines[] = $line;
+            }
+        }
+
+        return implode("\n", $updatedLines);
+    }
+
+    /**
+     * Update phone number in description
+     */
+    protected function updatePhoneInDescription(string $description, string $phone): string
+    {
+        $lines = explode("\n", $description);
+        
+        foreach ($lines as &$line) {
+            if (str_starts_with($line, '📱 Phone:')) {
+                $line = '📱 Phone: ' . $phone;
+                break;
+            }
+        }
+        
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Update name in description
+     */
+    protected function updateNameInDescription(string $description, string $name): string
+    {
+        $lines = explode("\n", $description);
+        
+        foreach ($lines as &$line) {
+            if (str_starts_with($line, '👤 Patient:')) {
+                $line = '👤 Patient: ' . $name;
+                break;
+            }
+        }
+        
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Update service in description
+     */
+    protected function updateServiceInDescription(string $description, string $service): string
+    {
+        $lines = explode("\n", $description);
+        
+        foreach ($lines as &$line) {
+            if (str_starts_with($line, '🏥 Service:')) {
+                $line = '🏥 Service: ' . $service;
+                break;
+            }
+        }
+        
+        return implode("\n", $lines);
     }
 }
